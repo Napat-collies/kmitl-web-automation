@@ -31,7 +31,16 @@ export async function postJSON(path, body) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-  if (!resp.ok) throw new Error(`${path} failed (${resp.status})`);
+  if (!resp.ok) {
+    // Surface the server's actionable message (e.g. "run playwright install"), not just a status code.
+    let detail = '';
+    try {
+      detail = (await resp.json()).detail ?? '';
+    } catch {
+      /* non-JSON body */
+    }
+    throw new Error(detail || `${path} failed (${resp.status})`);
+  }
   return resp.json();
 }
 

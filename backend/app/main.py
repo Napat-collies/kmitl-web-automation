@@ -11,13 +11,13 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from .agent import run_search_agent
-from .browser import JS_DEMO_URL, automate_login, render_vs_fetch
+from .browser import BrowserUnavailable, JS_DEMO_URL, automate_login, render_vs_fetch
 from .config import get_settings
 
 app = FastAPI(title="KMITL Web Automation Demo")
@@ -71,9 +71,15 @@ def search_agent(body: AgentIn) -> StreamingResponse:
 
 @app.post("/api/browser/render")
 async def browser_render(body: RenderIn) -> dict:
-    return await render_vs_fetch(body.url, get_settings())
+    try:
+        return await render_vs_fetch(body.url, get_settings())
+    except BrowserUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @app.post("/api/browser/automate")
 async def browser_automate(body: AutomateIn) -> dict:
-    return await automate_login(body.username, body.password, get_settings())
+    try:
+        return await automate_login(body.username, body.password, get_settings())
+    except BrowserUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc

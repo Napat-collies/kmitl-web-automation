@@ -34,7 +34,7 @@ Stack: **FastAPI + uv** (backend), **Svelte + Vite** (frontend), **Tavily** (sea
 ```bash
 cd backend
 uv sync                              # create the venv + install deps
-uv run playwright install chromium   # one-time: download the browser Playwright drives
+uv run playwright install chromium   # one-time: REQUIRED for the Browser tab (skip it and it errors)
 cp .env.example .env                 # then edit .env and paste your two keys
 uv run uvicorn app.main:app --reload --port 8000
 ```
@@ -110,10 +110,14 @@ extracted text, and answers with a citation your code recorded at fetch time.
 
 ## Troubleshooting
 
-- **`playwright install` fails / "Executable doesn't exist"** — you skipped
-  `uv run playwright install chromium`, or your OS is too old for the current browser
-  build. On an old Linux, pin an older Playwright (`uv pip install 'playwright==1.45'`)
-  then re-run the install.
+- **"Compare plain GET vs browser" (or login automation) shows a browser error** — the
+  browser isn't installed. Run `uv run playwright install chromium` in the `backend/`
+  folder, then click again. (The app now tells you this instead of a blank error; if you
+  see "Executable doesn't exist," it's the same fix.)
+- **`playwright install` itself fails / your OS is too old for the current browser
+  build** — pin an older Playwright (`uv pip install 'playwright==1.45'`) then re-run
+  `uv run playwright install chromium`. On Linux you may also need
+  `uv run playwright install-deps` (installs the shared libraries Chromium needs).
 - **`tavily_key_set: false` / `llm_key_set: false`** — your `backend/.env` is missing or
   the backend wasn't restarted after editing it.
 - **Frontend can't reach the API** — make sure the backend is running on port 8000; the

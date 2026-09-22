@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import httpx
 import trafilatura
+from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import async_playwright
 
 from .config import Settings
@@ -21,6 +22,28 @@ from .config import Settings
 _UA = "kmitl-web-automation/1.0 (teaching demo)"
 JS_DEMO_URL = "https://quotes.toscrape.com/js/"
 LOGIN_URL = "https://quotes.toscrape.com/login"
+
+
+class BrowserUnavailable(RuntimeError):
+    """The browser couldn't start — almost always because it wasn't installed."""
+
+
+def _launch_hint(exc: Exception) -> str:
+    return (
+        "Could not start the browser. In the backend/ folder run:\n"
+        "    uv run playwright install chromium\n"
+        "(on Linux you may also need: uv run playwright install-deps)\n"
+        f"Original error: {exc}"
+    )
+
+
+async def _launch_chromium(p):
+    """Launch chromium, turning the cryptic 'Executable doesn't exist' / missing-lib
+    failure into a clear, actionable BrowserUnavailable message."""
+    try:
+        return await p.chromium.launch()
+    except PlaywrightError as exc:
+        raise BrowserUnavailable(_launch_hint(exc)) from exc
 
 
 async def render_vs_fetch(url: str, settings: Settings) -> dict:
@@ -35,7 +58,7 @@ async def render_vs_fetch(url: str, settings: Settings) -> dict:
 
     # 2) real browser — runs the page's JavaScript, then reads the DOM
     async with async_playwright() as p:
-        browser = await p.chromium.launch()
+        browser = await _launch_chromium(p)
         page = await browser.new_page(user_agent=_UA)
         await page.goto(url, wait_until="networkidle", timeout=30000)
         rendered_text = (await page.inner_text("body")).strip()
@@ -64,7 +87,7 @@ async def automate_login(username: str, password: str, settings: Settings) -> di
         trace.append({"act": act, "obs": obs})
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch()
+        browser = await _launch_chromium(p)
         page = await browser.new_page(user_agent=_UA)
 
         await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
