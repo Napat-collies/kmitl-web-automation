@@ -9,13 +9,20 @@ Two demos:
 
 Target site: https://quotes.toscrape.com — a sandbox built for scraping practice
 (its /js/ page renders with JavaScript; its /login accepts any credentials).
+
+Note (Windows): Playwright's async API needs the Proactor event loop to spawn
+its browser subprocess, but uvicorn resets the loop policy to Selector on
+startup (worse with --reload), which breaks it with NotImplementedError. The
+sync API sidesteps this entirely — it manages its own subprocess machinery
+without depending on the calling loop's policy — so each Playwright call runs
+via the sync API inside a worker thread (asyncio.to_thread), keeping the
+FastAPI endpoints async without touching the main event loop.
 """
 from __future__ import annotations
-
+import asyncio 
 import httpx
 import trafilatura
-from playwright.async_api import Error as PlaywrightError
-from playwright.async_api import async_playwright
+from playwright.sync_api import sync_playwright
 
 from .config import Settings
 
@@ -24,30 +31,8 @@ JS_DEMO_URL = "https://quotes.toscrape.com/js/"
 LOGIN_URL = "https://quotes.toscrape.com/login"
 
 
-class BrowserUnavailable(RuntimeError):
-    """The browser couldn't start — almost always because it wasn't installed."""
-
-
-def _launch_hint(exc: Exception) -> str:
-    return (
-        "Could not start the browser. In the backend/ folder run:\n"
-        "    uv run playwright install chromium\n"
-        "(on Linux you may also need: uv run playwright install-deps)\n"
-        f"Original error: {exc}"
-    )
-
-
-async def _launch_chromium(p):
-    """Launch chromium, turning the cryptic 'Executable doesn't exist' / missing-lib
-    failure into a clear, actionable BrowserUnavailable message."""
-    try:
-        return await p.chromium.launch()
-    except PlaywrightError as exc:
-        raise BrowserUnavailable(_launch_hint(exc)) from exc
-
-
-async def render_vs_fetch(url: str, settings: Settings) -> dict:
-    """Compare a plain GET (no JavaScript) with a real browser render."""
+def _render_vs_fetch_sync(url: str, settings: Settings) -> dict:
+    """Runs in a worker thread. Compare a plain GET (no JavaScript) with a real browser render."""
     # 1) plain HTTP GET — what search+fetch would see
     try:
         raw_html = httpx.get(url, timeout=settings.request_timeout,
@@ -57,16 +42,16 @@ async def render_vs_fetch(url: str, settings: Settings) -> dict:
     raw_text = (trafilatura.extract(raw_html) or "").strip()
 
     # 2) real browser — runs the page's JavaScript, then reads the DOM
-    async with async_playwright() as p:
-        browser = await _launch_chromium(p)
-        page = await browser.new_page(user_agent=_UA)
-        await page.goto(url, wait_until="networkidle", timeout=30000)
-        rendered_text = (await page.inner_text("body")).strip()
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(user_agent=_UA)
+        page.goto(url, wait_until="networkidle", timeout=30000)
+        rendered_text = page.inner_text("body").strip()
         try:
-            quote_count = await page.locator(".quote").count()   # quotes.toscrape specific
+            quote_count = page.locator(".quote").count()   # quotes.toscrape specific
         except Exception:  # noqa: BLE001
             quote_count = None
-        await browser.close()
+        browser.close()
 
     return {
         "url": url,
@@ -79,40 +64,45 @@ async def render_vs_fetch(url: str, settings: Settings) -> dict:
     }
 
 
-async def automate_login(username: str, password: str, settings: Settings) -> dict:
-    """Drive the goto → fill → fill → click → read flow, recording every ACT/OBS."""
+async def render_vs_fetch(url: str, settings: Settings) -> dict:
+    """Async wrapper: offloads the sync Playwright flow to a worker thread."""
+    return await asyncio.to_thread(_render_vs_fetch_sync, url, settings)
+
+
+def _automate_login_sync(username: str, password: str, settings: Settings) -> dict:
+    """Runs in a worker thread. Drives goto → fill → fill → click → read, recording every ACT/OBS."""
     trace: list[dict] = []
 
     def log(act: str, obs: str) -> None:
         trace.append({"act": act, "obs": obs})
 
-    async with async_playwright() as p:
-        browser = await _launch_chromium(p)
-        page = await browser.new_page(user_agent=_UA)
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(user_agent=_UA)
 
-        await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
+        page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
         log(f'goto("{LOGIN_URL}")', f"ok ({page.url})")
 
-        await page.fill("input#username", username)
+        page.fill("input#username", username)
         log('fill("input#username", …)', f"typed {username!r}")
 
-        await page.fill("input#password", password)
+        page.fill("input#password", password)
         log('fill("input#password", …)', "typed ••••••")
 
-        await page.click("input[type=submit]")
-        await page.wait_for_load_state("domcontentloaded")
+        page.click("input[type=submit]")
+        page.wait_for_load_state("domcontentloaded")
         log('click("input[type=submit]")', f"navigated -> {page.url}")
 
-        logged_in = await page.locator("a[href='/logout']").count() > 0
+        logged_in = page.locator("a[href='/logout']").count() > 0
         log('read("a[href=/logout]")', "Logout link present" if logged_in
             else "not logged in (no Logout link)")
 
         first_author = ""
-        if await page.locator(".quote .author").count():
-            first_author = await page.locator(".quote .author").first.inner_text()
+        if page.locator(".quote .author").count():
+            first_author = page.locator(".quote .author").first.inner_text()
             log('read(".quote .author")', f"{first_author!r}")
 
-        await browser.close()
+        browser.close()
 
     return {
         "logged_in": logged_in,
@@ -120,3 +110,8 @@ async def automate_login(username: str, password: str, settings: Settings) -> di
                    f"{first_author}.") if logged_in else "Login did not succeed.",
         "trace": trace,
     }
+
+
+async def automate_login(username: str, password: str, settings: Settings) -> dict:
+    """Async wrapper: offloads the sync Playwright flow to a worker thread."""
+    return await asyncio.to_thread(_automate_login_sync, username, password, settings)
