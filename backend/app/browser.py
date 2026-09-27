@@ -10,18 +10,23 @@ Two demos:
 Target site: https://quotes.toscrape.com — a sandbox built for scraping practice
 (its /js/ page renders with JavaScript; its /login accepts any credentials).
 
-Note (Windows): Playwright's async API needs the Proactor event loop to spawn
-its browser subprocess, but uvicorn resets the loop policy to Selector on
-startup (worse with --reload), which breaks it with NotImplementedError. The
-sync API sidesteps this entirely — it manages its own subprocess machinery
-without depending on the calling loop's policy — so each Playwright call runs
-via the sync API inside a worker thread (asyncio.to_thread), keeping the
-FastAPI endpoints async without touching the main event loop.
+Why the SYNC Playwright API in a worker thread (not the async API)?
+    Playwright spawns a driver **subprocess**. Under some server event loops —
+    Windows' SelectorEventLoop, or certain uvicorn/uvloop thread setups — the
+    async API's `loop.subprocess_exec` hits `_make_subprocess_transport` and
+    raises `NotImplementedError`. Running the *sync* API via `asyncio.to_thread`
+    dispatches it to a fresh worker thread that has **no running event loop**, so
+    Playwright creates its own and handles the subprocess correctly everywhere
+    (Linux/macOS/Windows, uvloop or not). This keeps the FastAPI handlers async
+    while the browser work runs off the request loop.
 """
 from __future__ import annotations
-import asyncio 
+
+import asyncio
+
 import httpx
 import trafilatura
+from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import sync_playwright
 
 from .config import Settings
@@ -31,8 +36,31 @@ JS_DEMO_URL = "https://quotes.toscrape.com/js/"
 LOGIN_URL = "https://quotes.toscrape.com/login"
 
 
+class BrowserUnavailable(RuntimeError):
+    """The browser couldn't start — almost always because it wasn't installed."""
+
+
+def _launch_hint(exc: Exception) -> str:
+    return (
+        "Could not start the browser. In the backend/ folder run:\n"
+        "    uv run playwright install chromium\n"
+        "(on Linux you may also need: uv run playwright install-deps)\n"
+        f"Original error: {exc}"
+    )
+
+
+def _launch_chromium(p):
+    """Launch chromium, turning the cryptic 'Executable doesn't exist' / missing-lib
+    failure into a clear, actionable BrowserUnavailable message."""
+    try:
+        return p.chromium.launch()
+    except PlaywrightError as exc:
+        raise BrowserUnavailable(_launch_hint(exc)) from exc
+
+
+# --- sync workers (run inside a worker thread via asyncio.to_thread) ------------
+
 def _render_vs_fetch_sync(url: str, settings: Settings) -> dict:
-    """Runs in a worker thread. Compare a plain GET (no JavaScript) with a real browser render."""
     # 1) plain HTTP GET — what search+fetch would see
     try:
         raw_html = httpx.get(url, timeout=settings.request_timeout,
@@ -43,7 +71,7 @@ def _render_vs_fetch_sync(url: str, settings: Settings) -> dict:
 
     # 2) real browser — runs the page's JavaScript, then reads the DOM
     with sync_playwright() as p:
-        browser = p.chromium.launch()
+        browser = _launch_chromium(p)
         page = browser.new_page(user_agent=_UA)
         page.goto(url, wait_until="networkidle", timeout=30000)
         rendered_text = page.inner_text("body").strip()
@@ -64,20 +92,14 @@ def _render_vs_fetch_sync(url: str, settings: Settings) -> dict:
     }
 
 
-async def render_vs_fetch(url: str, settings: Settings) -> dict:
-    """Async wrapper: offloads the sync Playwright flow to a worker thread."""
-    return await asyncio.to_thread(_render_vs_fetch_sync, url, settings)
-
-
 def _automate_login_sync(username: str, password: str, settings: Settings) -> dict:
-    """Runs in a worker thread. Drives goto → fill → fill → click → read, recording every ACT/OBS."""
     trace: list[dict] = []
 
     def log(act: str, obs: str) -> None:
         trace.append({"act": act, "obs": obs})
 
     with sync_playwright() as p:
-        browser = p.chromium.launch()
+        browser = _launch_chromium(p)
         page = browser.new_page(user_agent=_UA)
 
         page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
@@ -112,6 +134,13 @@ def _automate_login_sync(username: str, password: str, settings: Settings) -> di
     }
 
 
+# --- async wrappers the FastAPI handlers await ---------------------------------
+
+async def render_vs_fetch(url: str, settings: Settings) -> dict:
+    """Compare a plain GET (no JavaScript) with a real browser render."""
+    return await asyncio.to_thread(_render_vs_fetch_sync, url, settings)
+
+
 async def automate_login(username: str, password: str, settings: Settings) -> dict:
-    """Async wrapper: offloads the sync Playwright flow to a worker thread."""
+    """Drive the goto → fill → fill → click → read flow, recording every ACT/OBS."""
     return await asyncio.to_thread(_automate_login_sync, username, password, settings)
