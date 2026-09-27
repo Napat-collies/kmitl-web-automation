@@ -38,7 +38,6 @@ uv run playwright install chromium   # one-time: REQUIRED for the Browser tab (s
 cp .env.example .env                 # then edit .env and paste your two keys
 uv run uvicorn app.main:app --reload --port 8000
 ```
-
 Your `backend/.env` should look like:
 
 ```
@@ -48,6 +47,46 @@ LLM_API_KEY=sk-xxxxxxxx
 
 Check it's alive: open http://localhost:8000/api/health — you should see
 `{"llm_key_set": true, "tavily_key_set": true, ...}`.
+
+### ความแตกต่างของคำสั่ง uv sync กับ python -m venv .venv
+
+```bash
+ความแตกต่างหลักคือ python -m venv .venv ทำหน้าที่สร้างโฟลเดอร์สภาพแวดล้อมจำลองเปล่าๆ เพียงอย่างเดียว ในขณะที่ uv sync เป็นคำสั่งแบบ All-in-One ที่สร้าง + ติดตั้ง + ล็อกเวอร์ชัน + ปรับแต่ง Packages ให้ตรงกับโปรเจกต์อัตโนมัติ
+```
+# การเปรียบเทียบ `python -m venv .venv` vs `uv sync`
+
+## 📊 ตารางเปรียบเทียบ
+
+| คุณสมบัติ | `python -m venv .venv` | `uv sync` |
+| :--- | :--- | :--- |
+| **หน้าที่หลัก** | สร้างโฟลเดอร์สภาพแวดล้อมจำลองเปล่าๆ | สร้าง `.venv` + ติดตั้ง Dependencies ตามโปรเจกต์ให้อัตโนมัติ[cite: 1] |
+| **การติดตั้ง Packages** | ไม่ติดตั้งอะไรเลย (ต้องรัน `requirements.txt` แยกเอง) | ติดตั้ง Package ทั้งหมดจาก `pyproject.toml` หรือ `uv.lock` |
+| **การจัดการส่วนเกิน** | ไม่ลบ Package ที่ไม่ได้ใช้แล้วออก | ลบ Package ที่ไม่มีในไฟล์โปรเจกต์ออกให้อัตโนมัติ |
+| **การเปิดใช้งาน (Activation)** | ต้องสั่ง `source .venv/bin/activate` ก่อนรัน | ไม่ต้อง Activate สามารถรันผ่าน `uv run <command>` ได้เลย |
+| **ภาษาที่ใช้พัฒนา** | Python | Rust (ประมวลผลเร็วกว่ามาก) |
+
+---
+
+## 🔄 เปรียบเทียบ Workflow การทำงาน
+
+### 1. การทำงานแบบดั้งเดิม (Standard Python)
+```bash
+# 1. สร้าง Virtual Environment เปล่า
+python -m venv .venv
+
+# 2. Activate เข้าสู่สภาพแวดล้อมจำลอง
+source .venv/bin/activate  # สำหรับ Linux / macOS
+# .venv\Scripts\activate   # สำหรับ Windows
+
+# 3. ติดตั้ง Dependencies
+pip install -r requirements.txt
+```
+
+### 2. การทำงานแบบใหม่
+#คำสั่งเดียวสร้าง venv และติดตั้ง dependencies ตามที่ระบุไว้ในโปรเจกต์ให้อัตโนมัติ
+```bash
+uv sync
+```
 
 ### 2 · Frontend (Svelte)
 
@@ -118,6 +157,11 @@ extracted text, and answers with a citation your code recorded at fetch time.
   build** — pin an older Playwright (`uv pip install 'playwright==1.45'`) then re-run
   `uv run playwright install chromium`. On Linux you may also need
   `uv run playwright install-deps` (installs the shared libraries Chromium needs).
+- **`NotImplementedError` / `_make_subprocess_transport` when using the browser** — this
+  came from running Playwright's async API on a server event loop that can't spawn a
+  subprocess (Windows' selector loop, some uvicorn/uvloop setups). The app now runs
+  Playwright's **sync** API in a worker thread (`asyncio.to_thread`), which sidesteps it
+  on every platform — just pull the latest code.
 - **`tavily_key_set: false` / `llm_key_set: false`** — your `backend/.env` is missing or
   the backend wasn't restarted after editing it.
 - **Frontend can't reach the API** — make sure the backend is running on port 8000; the
